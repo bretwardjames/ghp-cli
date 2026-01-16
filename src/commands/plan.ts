@@ -14,8 +14,9 @@ interface PlanOptions {
 }
 
 export async function planCommand(shortcut?: string, command?: any): Promise<void> {
-    // Commander passes (shortcut, Command) - get options from command.opts()
-    const cliOpts: PlanOptions = command?.opts?.() || {};
+    // Commander passes (shortcut, options) for optional positional args
+    // The options object is passed directly, not as command.opts()
+    const cliOpts: PlanOptions = command?.opts?.() || command || {};
 
     let options: PlanOptions;
     let shortcutName: string | undefined = shortcut;

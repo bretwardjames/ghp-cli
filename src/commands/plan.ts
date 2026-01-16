@@ -13,17 +13,12 @@ interface PlanOptions {
     slice?: string[];
 }
 
-export async function planCommand(shortcutOrOptions?: string | PlanOptions, cliOpts?: PlanOptions): Promise<void> {
-    // Handle shortcut as first argument
-    let options: PlanOptions;
-    let shortcutName: string | undefined;
+export async function planCommand(shortcut?: string, command?: any): Promise<void> {
+    // Commander passes (shortcut, Command) - get options from command.opts()
+    const cliOpts: PlanOptions = command?.opts?.() || {};
 
-    if (typeof shortcutOrOptions === 'string') {
-        shortcutName = shortcutOrOptions;
-        options = cliOpts || {};
-    } else {
-        options = shortcutOrOptions || {};
-    }
+    let options: PlanOptions;
+    let shortcutName: string | undefined = shortcut;
 
     // Load defaults first
     const defaults = getPlanDefaults();
@@ -55,16 +50,16 @@ export async function planCommand(shortcutOrOptions?: string | PlanOptions, cliO
         options = {
             ...defaults,
             ...shortcut,
-            ...options,
+            ...cliOpts,
             // Merge slice arrays
-            slice: [...(defaults.slice || []), ...(shortcut.slice || []), ...(options.slice || [])],
+            slice: [...(defaults.slice || []), ...(shortcut.slice || []), ...(cliOpts.slice || [])],
         };
     } else {
         // Merge: defaults < CLI options
         options = {
             ...defaults,
-            ...options,
-            slice: [...(defaults.slice || []), ...(options.slice || [])],
+            ...cliOpts,
+            slice: [...(defaults.slice || []), ...(cliOpts.slice || [])],
         };
     }
 

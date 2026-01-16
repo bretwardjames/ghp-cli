@@ -1,4 +1,5 @@
 import chalk from 'chalk';
+import { api } from '../github-api.js';
 import { detectRepository, checkoutBranch, branchExists, getCurrentBranch } from '../git-utils.js';
 import { getBranchForIssue } from '../branch-linker.js';
 
@@ -44,5 +45,27 @@ export async function switchCommand(issue: string): Promise<void> {
     } catch (error) {
         console.error(chalk.red('Error:'), 'Failed to switch branch:', error);
         process.exit(1);
+    }
+
+    // Update active label
+    const authenticated = await api.authenticate();
+    if (authenticated) {
+        const activeLabel = api.getActiveLabelName();
+
+        // Remove label from any other issues that have it
+        const issuesWithLabel = await api.findIssuesWithLabel(repo, activeLabel);
+        for (const otherIssue of issuesWithLabel) {
+            if (otherIssue !== issueNumber) {
+                await api.removeLabelFromIssue(repo, otherIssue, activeLabel);
+                console.log(chalk.dim(`Removed ${activeLabel} from #${otherIssue}`));
+            }
+        }
+
+        // Add label to current issue (ensure it exists first)
+        await api.ensureLabel(repo, activeLabel);
+        const labelAdded = await api.addLabelToIssue(repo, issueNumber, activeLabel);
+        if (labelAdded) {
+            console.log(chalk.green('✓'), `Applied "${activeLabel}" label`);
+        }
     }
 }

@@ -18,6 +18,7 @@ import { setFieldCommand } from './commands/set-field.js';
 import { sliceCommand } from './commands/slice.js';
 import { openCommand } from './commands/open.js';
 import { commentCommand } from './commands/comment.js';
+import { syncCommand } from './commands/sync.js';
 
 const program = new Command();
 
@@ -52,6 +53,11 @@ program
     .option('-s, --status <status>', 'Filter by status')
     .option('--hide-done', 'Hide completed items')
     .option('-l, --list', 'Output as simple list (one item per line, for pickers)')
+    .option('-f, --flat', 'Output as flat table instead of grouped by status')
+    .option('-g, --group <field>', 'Group items by field (status, type, assignee, priority, size, labels)')
+    .option('--sort <fields>', 'Sort by fields (comma-separated, prefix with - for ascending)')
+    .option('--slice <field=value>', 'Filter by field (repeatable)', (val: string, acc: string[]) => { acc.push(val); return acc; }, [])
+    .option('-F, --filter <field=value>', 'Filter by field (repeatable, e.g., --filter state=open)', (val: string, acc: string[]) => { acc.push(val); return acc; }, [])
     .action(workCommand);
 
 program
@@ -60,11 +66,14 @@ program
     .description('Show project board or filtered list view (use shortcut name from config)')
     .option('-p, --project <project>', 'Filter by project name')
     .option('-s, --status <status>', 'Show only items in this status (list view)')
+    .option('-a, --all', 'Show all items in table view (overrides board view)')
     .option('-m, --mine', 'Show only items assigned to me')
     .option('-u, --unassigned', 'Show only unassigned items')
-    .option('-l, --list', 'Output as simple list (one item per line, for pickers)')
+    .option('-l, --list', 'Output as table view')
+    .option('-g, --group <field>', 'Group items by field (status, type, assignee, priority, size, labels)')
     .option('--sort <fields>', 'Sort by fields (comma-separated, prefix with - for ascending, e.g., "status,-title")')
     .option('--slice <field=value>', 'Filter by field (repeatable: --slice label=bug --slice Priority=High)', (val: string, acc: string[]) => { acc.push(val); return acc; }, [])
+    .option('--view <name>', 'Filter to items in a specific project view')
     .action(planCommand);
 
 // Workflow commands
@@ -165,5 +174,11 @@ program
     .description('Add a comment to an issue')
     .option('-m, --message <text>', 'Comment text (opens editor if not provided)')
     .action(commentCommand);
+
+// Active label sync
+program
+    .command('sync')
+    .description('Sync active label to match current branch')
+    .action(syncCommand);
 
 program.parse();

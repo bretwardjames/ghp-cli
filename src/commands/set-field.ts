@@ -21,7 +21,37 @@ export async function setFieldCommand(issue: string, field: string, value: strin
         process.exit(1);
     }
 
-    // Find the item
+    // Handle issue type separately (it's an issue property, not a project field)
+    const fieldLower = field.toLowerCase();
+    if (fieldLower === 'type' || fieldLower === 'issuetype' || fieldLower === 'issue-type') {
+        const issueTypes = await api.getIssueTypes(repo);
+
+        if (issueTypes.length === 0) {
+            console.error(chalk.red('Error:'), 'Issue types are not enabled for this repository');
+            process.exit(1);
+        }
+
+        const targetType = issueTypes.find(t =>
+            t.name.toLowerCase() === value.toLowerCase()
+        );
+
+        if (!targetType) {
+            console.error(chalk.red('Error:'), `Invalid issue type "${value}"`);
+            console.log('Available types:', issueTypes.map(t => t.name).join(', '));
+            process.exit(1);
+        }
+
+        const success = await api.setIssueType(repo, issueNumber, targetType.id);
+        if (success) {
+            console.log(chalk.green('Updated:'), `#${issueNumber} Type = ${targetType.name}`);
+        } else {
+            console.error(chalk.red('Error:'), 'Failed to update issue type');
+            process.exit(1);
+        }
+        return;
+    }
+
+    // Find the item in a project (needed for project field updates)
     const item = await api.findItemByNumber(repo, issueNumber);
     if (!item) {
         console.error(chalk.red('Error:'), `Issue #${issueNumber} not found in any project`);

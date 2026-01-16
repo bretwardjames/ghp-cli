@@ -1,7 +1,8 @@
 import chalk from 'chalk';
 import { api } from '../github-api.js';
 import { detectRepository } from '../git-utils.js';
-import { getShortcut, getPlanDefaults, listShortcuts } from '../config.js';
+import { getShortcut, getPlanDefaults, listShortcuts, getConfig } from '../config.js';
+import { displayTable, parseColumns, DEFAULT_COLUMNS, calculateColumnWidths, displayTableWithWidths, type ColumnName } from '../table.js';
 import type { ProjectItem } from '../types.js';
 
 interface PlanOptions {
@@ -12,6 +13,94 @@ interface PlanOptions {
     list?: boolean;
     sort?: string;
     slice?: string[];
+    all?: boolean;
+    view?: string;
+    group?: string;
+}
+
+/**
+ * Parse and apply a GitHub Project view filter expression
+ * Format: field:value1,value2 field2:value3 -field3:excluded
+ * Special: @me expands to current username
+ */
+function applyViewFilter(items: ProjectItem[], filterExpr: string, username: string): ProjectItem[] {
+    if (!filterExpr.trim()) return items;
+
+    // Parse filter tokens: field:values or -field:values (negation)
+    const tokens = filterExpr.match(/(-?\w+):"([^"]+)"|(-?\w+):(\S+)/g) || [];
+
+    let result = items;
+
+    for (const token of tokens) {
+        const negated = token.startsWith('-');
+        const cleanToken = negated ? token.slice(1) : token;
+
+        // Parse field:values
+        const colonIdx = cleanToken.indexOf(':');
+        if (colonIdx === -1) continue;
+
+        const field = cleanToken.slice(0, colonIdx).toLowerCase();
+        let valuesStr = cleanToken.slice(colonIdx + 1);
+
+        // Remove quotes if present
+        if (valuesStr.startsWith('"') && valuesStr.endsWith('"')) {
+            valuesStr = valuesStr.slice(1, -1);
+        }
+
+        // Split values by comma and expand @me
+        const values = valuesStr.split(',').map(v => {
+            const trimmed = v.trim();
+            return trimmed === '@me' ? username : trimmed;
+        });
+
+        result = result.filter(item => {
+            let matches = false;
+
+            switch (field) {
+                case 'status':
+                    matches = values.some(v =>
+                        item.status?.toLowerCase() === v.toLowerCase()
+                    );
+                    break;
+                case 'assignee':
+                case 'assignees':
+                    matches = values.some(v =>
+                        item.assignees.some(a => a.toLowerCase() === v.toLowerCase())
+                    );
+                    break;
+                case 'label':
+                case 'labels':
+                    matches = values.some(v =>
+                        item.labels.some(l => l.name.toLowerCase().includes(v.toLowerCase()))
+                    );
+                    break;
+                case 'type':
+                    matches = values.some(v =>
+                        item.issueType?.toLowerCase() === v.toLowerCase()
+                    );
+                    break;
+                case 'repo':
+                case 'repository':
+                    matches = values.some(v =>
+                        item.repository?.toLowerCase().includes(v.toLowerCase())
+                    );
+                    break;
+                default:
+                    // Check custom fields
+                    const fieldValue = item.fields[field] ||
+                        Object.entries(item.fields).find(([k]) => k.toLowerCase() === field)?.[1];
+                    if (fieldValue) {
+                        matches = values.some(v =>
+                            fieldValue.toLowerCase().includes(v.toLowerCase())
+                        );
+                    }
+            }
+
+            return negated ? !matches : matches;
+        });
+    }
+
+    return result;
 }
 
 export async function planCommand(shortcut?: string, command?: any): Promise<void> {
@@ -108,6 +197,37 @@ export async function planCommand(shortcut?: string, command?: any): Promise<voi
     // Apply filters
     let filteredItems = allItems;
 
+    // --view: filter by project view's filter expression
+    if (options.view) {
+        // Find the view in target projects
+        let viewFound = false;
+        for (const project of targetProjects) {
+            const views = await api.getProjectViews(project.id);
+            const view = views.find(v => v.name.toLowerCase() === options.view!.toLowerCase());
+            if (view) {
+                viewFound = true;
+                if (view.filter) {
+                    // Parse and apply the view's filter
+                    filteredItems = applyViewFilter(filteredItems, view.filter, api.username || '');
+                }
+                // Only use items from this project for the view
+                filteredItems = filteredItems.filter(item => item.projectId === project.id);
+                break;
+            }
+        }
+        if (!viewFound) {
+            console.error(chalk.red('View not found:'), options.view);
+            console.log(chalk.dim('Available views:'));
+            for (const project of targetProjects) {
+                const views = await api.getProjectViews(project.id);
+                for (const v of views) {
+                    console.log(`  ${chalk.cyan(v.name)}`);
+                }
+            }
+            process.exit(1);
+        }
+    }
+
     // --mine: filter to current user
     if (options.mine) {
         filteredItems = filteredItems.filter(item =>
@@ -158,6 +278,10 @@ export async function planCommand(shortcut?: string, command?: any): Promise<voi
                 }
                 if (fieldLower === 'project') {
                     return item.projectTitle.toLowerCase().includes(valueLower);
+                }
+                if (fieldLower === 'state') {
+                    // state can be: open, closed, merged
+                    return item.state?.toLowerCase() === valueLower;
                 }
 
                 // Check custom project fields
@@ -210,13 +334,38 @@ export async function planCommand(shortcut?: string, command?: any): Promise<voi
         });
     }
 
+    // Determine if we need status column (when items have mixed statuses)
+    const needsStatusColumn = options.list || options.all || options.view || (options.group && options.group.toLowerCase() !== 'status');
+    const defaultColumnsWithStatus: ColumnName[] = ['number', 'type', 'title', 'status', 'assignees', 'priority', 'size', 'labels'];
+
     // Display based on mode
-    if (options.list) {
-        // Simple list view (one item per line, for pickers)
-        displaySimpleList(filteredItems);
+    if (options.group) {
+        // Grouped view - group by specified field
+        displayGroupedView(filteredItems, options.group, options);
+    } else if (options.list || options.all || options.view) {
+        // Table view for all items or view items (includes status column)
+        const label = options.view
+            ? `View: ${options.view}`
+            : options.mine
+                ? 'My Items'
+                : options.unassigned
+                    ? 'Unassigned Items'
+                    : 'All Items';
+        console.log(chalk.bold(label), chalk.dim(`(${filteredItems.length} items)`));
+        console.log();
+        const columnsConfig = getConfig('columns');
+        const columns: ColumnName[] = columnsConfig ? parseColumns(columnsConfig) : defaultColumnsWithStatus;
+        displayTable(filteredItems, columns);
+        console.log();
     } else if (options.status) {
-        // List view for single status
-        displayListView(filteredItems, options.status, options);
+        // Table view for single status
+        const label = options.mine ? `My ${options.status}` : options.unassigned ? `Unassigned ${options.status}` : options.status;
+        console.log(chalk.bold(label), chalk.dim(`(${filteredItems.length} items)`));
+        console.log();
+        const columnsConfig = getConfig('columns');
+        const columns: ColumnName[] = columnsConfig ? parseColumns(columnsConfig) : DEFAULT_COLUMNS;
+        displayTable(filteredItems, columns);
+        console.log();
     } else {
         // Board view
         displayBoardView(filteredItems, targetProjects, options);
@@ -233,7 +382,8 @@ function getFieldValue(item: ProjectItem, fieldName: string): any {
         case 'title':
             return item.title;
         case 'status':
-            return item.status;
+            // Return statusIndex for sorting by project's defined order
+            return item.statusIndex;
         case 'type':
             return item.type;
         case 'issuetype':
@@ -274,126 +424,125 @@ function displaySimpleList(items: ProjectItem[]): void {
     }
 }
 
-function displayListView(items: ProjectItem[], status: string, opts: PlanOptions): void {
-    const label = opts.mine ? `My ${status}` : opts.unassigned ? `Unassigned ${status}` : status;
-    console.log(chalk.bold(label), chalk.dim(`(${items.length} items)`));
-    console.log();
+/**
+ * Get display value for a field (for grouping headers, not sorting)
+ */
+function getFieldDisplayValue(item: ProjectItem, fieldName: string): string {
+    const lower = fieldName.toLowerCase();
 
+    switch (lower) {
+        case 'status':
+            return item.status || 'No Status';
+        case 'type':
+        case 'issuetype':
+        case 'issue-type':
+            return item.issueType || 'No Type';
+        case 'assignee':
+        case 'assignees':
+            return item.assignees.length > 0 ? item.assignees.join(', ') : 'Unassigned';
+        case 'priority':
+            return item.fields['Priority'] || item.fields['priority'] || 'No Priority';
+        case 'size':
+            return item.fields['Size'] || item.fields['size'] || item.fields['Estimate'] || 'No Size';
+        case 'label':
+        case 'labels':
+            return item.labels.length > 0 ? item.labels.map(l => l.name).join(', ') : 'No Labels';
+        case 'project':
+            return item.projectTitle;
+        case 'repo':
+        case 'repository':
+            return item.repository || 'Unknown';
+        default:
+            // Check custom fields
+            const fieldValue = item.fields[fieldName] ||
+                Object.entries(item.fields).find(([k]) => k.toLowerCase() === lower)?.[1];
+            return fieldValue || `No ${fieldName}`;
+    }
+}
+
+/**
+ * Display items grouped by a field
+ */
+function displayGroupedView(items: ProjectItem[], groupField: string, opts: PlanOptions): void {
     if (items.length === 0) {
         console.log(chalk.dim('No items found.'));
         return;
     }
 
-    // Build rows with raw data for width calculation
-    const rows: Array<{
-        num: string;
-        type: string;
-        title: string;
-        assignees: string;
-        priority: string;
-        size: string;
-        labels: Array<{ name: string; color: string }>;
-    }> = items.map(item => ({
-        num: item.number ? `#${item.number}` : 'draft',
-        type: item.issueType || '',
-        title: item.title,
-        assignees: item.assignees.map(a => '@' + a).join(' '),
-        priority: item.fields['Priority'] || item.fields['priority'] || '',
-        size: item.fields['Size'] || item.fields['size'] || item.fields['Estimate'] || item.fields['estimate'] || '',
-        labels: item.labels,
-    }));
+    // Group items by the field value
+    const groups = new Map<string, ProjectItem[]>();
+    const groupOrder: string[] = []; // Track order of first appearance
 
-    // Calculate column widths
-    const numWidth = Math.max(...rows.map(r => r.num.length), 5);
-    const typeWidth = Math.max(...rows.map(r => r.type.length), 0);
-    const assigneeWidth = Math.max(...rows.map(r => r.assignees.length), 0);
-    const priorityWidth = Math.max(...rows.map(r => r.priority.length), 0);
-    const sizeWidth = Math.max(...rows.map(r => r.size.length), 0);
-
-    // Calculate title width (remaining space, min 20, max 60)
-    const termWidth = process.stdout.columns || 120;
-    const fixedWidth = numWidth + typeWidth + assigneeWidth + priorityWidth + sizeWidth + 12; // spacing
-    const titleWidth = Math.max(20, Math.min(60, termWidth - fixedWidth - 4));
-
-    // Print header row
-    const headerParts: string[] = [];
-    headerParts.push(chalk.dim('#'.padEnd(numWidth)));
-    if (typeWidth > 0) {
-        headerParts.push(chalk.dim('Type'.padEnd(typeWidth)));
-    }
-    headerParts.push(chalk.dim('Title'.padEnd(titleWidth)));
-    if (assigneeWidth > 0) {
-        headerParts.push(chalk.dim('Assignee'.padEnd(assigneeWidth)));
-    }
-    if (priorityWidth > 0) {
-        headerParts.push(chalk.dim('Priority'.padEnd(priorityWidth)));
-    }
-    if (sizeWidth > 0) {
-        headerParts.push(chalk.dim('Size'.padEnd(sizeWidth)));
-    }
-    const hasLabels = rows.some(r => r.labels.length > 0);
-    if (hasLabels) {
-        headerParts.push(chalk.dim('Labels'));
-    }
-    console.log(`  ${headerParts.join('  ')}`);
-    console.log(chalk.dim('  ' + '─'.repeat(Math.min(termWidth - 4, fixedWidth + titleWidth + 10))));
-
-    // Print rows
-    for (const row of rows) {
-        const parts: string[] = [];
-
-        // Number
-        parts.push(row.num === 'draft'
-            ? chalk.dim(row.num.padEnd(numWidth))
-            : chalk.cyan(row.num.padEnd(numWidth)));
-
-        // Issue Type
-        if (typeWidth > 0) {
-            parts.push(chalk.yellow(row.type.padEnd(typeWidth)));
+    for (const item of items) {
+        const groupValue = getFieldDisplayValue(item, groupField);
+        if (!groups.has(groupValue)) {
+            groups.set(groupValue, []);
+            groupOrder.push(groupValue);
         }
-
-        // Title (truncated if needed)
-        const truncTitle = row.title.length > titleWidth
-            ? row.title.substring(0, titleWidth - 1) + '…'
-            : row.title.padEnd(titleWidth);
-        parts.push(truncTitle);
-
-        // Assignees
-        if (assigneeWidth > 0) {
-            parts.push(chalk.cyan(row.assignees.padEnd(assigneeWidth)));
-        }
-
-        // Priority
-        if (priorityWidth > 0) {
-            parts.push(chalk.magenta(row.priority.padEnd(priorityWidth)));
-        }
-
-        // Size
-        if (sizeWidth > 0) {
-            parts.push(chalk.blue(row.size.padEnd(sizeWidth)));
-        }
-
-        // Labels (not padded, at the end)
-        if (row.labels.length > 0) {
-            const labelStr = row.labels.map(l => {
-                const bg = hexToChalk(l.color);
-                return bg(` ${l.name} `);
-            }).join(' ');
-            parts.push(labelStr);
-        }
-
-        console.log(`  ${parts.join('  ')}`);
+        groups.get(groupValue)!.push(item);
     }
-    console.log();
-}
 
-function hexToChalk(hex: string): (text: string) => string {
-    const r = parseInt(hex.slice(0, 2), 16);
-    const g = parseInt(hex.slice(2, 4), 16);
-    const b = parseInt(hex.slice(4, 6), 16);
-    const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
-    const textColor = luminance > 0.5 ? chalk.black : chalk.white;
-    return (text: string) => textColor.bgRgb(r, g, b)(text);
+    // Sort groups by the field's natural order (using getFieldValue for sort key)
+    // For status, this will use statusIndex; for others, alphabetical
+    const lower = groupField.toLowerCase();
+    if (lower === 'status') {
+        // Sort by statusIndex of first item in each group
+        groupOrder.sort((a, b) => {
+            const aItem = groups.get(a)![0];
+            const bItem = groups.get(b)![0];
+            return aItem.statusIndex - bItem.statusIndex;
+        });
+    } else {
+        // Alphabetical, but put "No X" / "Unassigned" at the end
+        groupOrder.sort((a, b) => {
+            const aIsEmpty = a.startsWith('No ') || a === 'Unassigned';
+            const bIsEmpty = b.startsWith('No ') || b === 'Unassigned';
+            if (aIsEmpty && !bIsEmpty) return 1;
+            if (!aIsEmpty && bIsEmpty) return -1;
+            return a.localeCompare(b);
+        });
+    }
+
+    // Determine columns - exclude the group field from columns
+    const columnsConfig = getConfig('columns');
+    let columns: ColumnName[] = columnsConfig
+        ? parseColumns(columnsConfig)
+        : DEFAULT_COLUMNS;
+
+    // Remove the grouped field from columns since it's shown in the header
+    const groupFieldLower = groupField.toLowerCase();
+    const fieldToColumnMap: Record<string, ColumnName> = {
+        'status': 'status',
+        'type': 'type',
+        'issuetype': 'type',
+        'issue-type': 'type',
+        'assignee': 'assignees',
+        'assignees': 'assignees',
+        'priority': 'priority',
+        'size': 'size',
+        'label': 'labels',
+        'labels': 'labels',
+        'project': 'project',
+        'repo': 'repository',
+        'repository': 'repository',
+    };
+    const columnToRemove = fieldToColumnMap[groupFieldLower];
+    if (columnToRemove) {
+        columns = columns.filter(c => c !== columnToRemove);
+    }
+
+    // Pre-calculate column widths based on ALL items so tables align across groups
+    // We do this by getting the max width needed for each column across all items
+    const columnWidths = calculateColumnWidths(items, columns);
+
+    // Display each group
+    for (const groupValue of groupOrder) {
+        const groupItems = groups.get(groupValue)!;
+        console.log(chalk.bold.cyan(`■ ${groupValue}`) + chalk.dim(` (${groupItems.length})`));
+        console.log();
+        displayTableWithWidths(groupItems, columns, columnWidths);
+        console.log();
+    }
 }
 
 async function displayBoardView(

@@ -135,6 +135,15 @@ export class GitHubAPI {
     async getProjectItems(projectId: string, projectTitle: string): Promise<ProjectItem[]> {
         if (!this.graphqlWithAuth) throw new Error('Not authenticated');
 
+        // First, get the status field to build a status order map
+        const statusField = await this.getStatusField(projectId);
+        const statusOrderMap = new Map<string, number>();
+        if (statusField) {
+            statusField.options.forEach((opt, idx) => {
+                statusOrderMap.set(opt.name.toLowerCase(), idx);
+            });
+        }
+
         const response: {
             node: {
                 items: {
@@ -156,6 +165,8 @@ export class GitHubAPI {
                             title?: string;
                             number?: number;
                             url?: string;
+                            state?: string;
+                            merged?: boolean;
                             issueType?: { name: string } | null;
                             assignees?: {
                                 nodes: Array<{ login: string }>;
@@ -206,6 +217,7 @@ export class GitHubAPI {
                                         title
                                         number
                                         url
+                                        state
                                         issueType { name }
                                         assignees(first: 5) { nodes { login } }
                                         labels(first: 10) { nodes { name color } }
@@ -215,6 +227,8 @@ export class GitHubAPI {
                                         title
                                         number
                                         url
+                                        state
+                                        merged
                                         assignees(first: 5) { nodes { login } }
                                         labels(first: 10) { nodes { name color } }
                                         repository { name }
@@ -258,13 +272,32 @@ export class GitHubAPI {
                 if (content.__typename === 'Issue') type = 'issue';
                 else if (content.__typename === 'PullRequest') type = 'pull_request';
 
+                const status = fields['Status'] || null;
+                const statusIndex = status
+                    ? (statusOrderMap.get(status.toLowerCase()) ?? 999)
+                    : 999;
+
+                // Determine issue/PR state
+                let state: 'open' | 'closed' | 'merged' | null = null;
+                if (content.state) {
+                    if (content.merged) {
+                        state = 'merged';
+                    } else if (content.state === 'OPEN') {
+                        state = 'open';
+                    } else {
+                        state = 'closed';
+                    }
+                }
+
                 return {
                     id: item.id,
                     title: content.title || 'Untitled',
                     number: content.number || null,
                     type,
                     issueType: content.issueType?.name || null,
-                    status: fields['Status'] || null,
+                    status,
+                    statusIndex,
+                    state,
                     assignees: content.assignees?.nodes.map(a => a.login) || [],
                     labels: content.labels?.nodes || [],
                     repository: content.repository?.name || null,
@@ -322,6 +355,44 @@ export class GitHubAPI {
             fieldId: statusField.id,
             options: statusField.options,
         };
+    }
+
+    /**
+     * Get project views
+     */
+    async getProjectViews(projectId: string): Promise<Array<{ name: string; filter: string | null }>> {
+        if (!this.graphqlWithAuth) throw new Error('Not authenticated');
+
+        try {
+            const response: {
+                node: {
+                    views: {
+                        nodes: Array<{
+                            name: string;
+                            filter: string | null;
+                        }>;
+                    };
+                };
+            } = await this.graphqlWithAuth(`
+                query($projectId: ID!) {
+                    node(id: $projectId) {
+                        ... on ProjectV2 {
+                            views(first: 20) {
+                                nodes {
+                                    name
+                                    filter
+                                }
+                            }
+                        }
+                    }
+                }
+            `, { projectId });
+
+            return response.node.views.nodes;
+        } catch (error) {
+            console.error('Error fetching project views:', error);
+            return [];
+        }
     }
 
     /**
@@ -753,6 +824,279 @@ export class GitHubAPI {
             return response.repository.issues.nodes;
         } catch {
             return [];
+        }
+    }
+
+    /**
+     * Get the active label name for a user
+     */
+    getActiveLabelName(): string {
+        return `@${this.username}:active`;
+    }
+
+    /**
+     * Ensure a label exists in the repository, create if it doesn't
+     */
+    async ensureLabel(repo: RepoInfo, labelName: string, color: string = '1f883d'): Promise<boolean> {
+        if (!this.graphqlWithAuth) throw new Error('Not authenticated');
+
+        try {
+            // First check if label exists
+            const checkResponse: {
+                repository: {
+                    label: { id: string } | null;
+                };
+            } = await this.graphqlWithAuth(`
+                query($owner: String!, $name: String!, $labelName: String!) {
+                    repository(owner: $owner, name: $name) {
+                        label(name: $labelName) {
+                            id
+                        }
+                    }
+                }
+            `, { owner: repo.owner, name: repo.name, labelName });
+
+            if (checkResponse.repository.label) {
+                return true; // Label already exists
+            }
+
+            // Create the label using REST API (GraphQL createLabel requires different permissions)
+            const token = await this.getToken();
+            const response = await fetch(
+                `https://api.github.com/repos/${repo.owner}/${repo.name}/labels`,
+                {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `token ${token}`,
+                        'Content-Type': 'application/json',
+                        'Accept': 'application/vnd.github.v3+json',
+                    },
+                    body: JSON.stringify({
+                        name: labelName,
+                        color: color,
+                        description: `Active working indicator for ${this.username}`,
+                    }),
+                }
+            );
+
+            if (response.status === 201) {
+                return true;
+            } else if (response.status === 422) {
+                // Label already exists (race condition)
+                return true;
+            } else {
+                console.error('Failed to create label:', await response.text());
+                return false;
+            }
+        } catch (error) {
+            console.error('Failed to ensure label:', error);
+            return false;
+        }
+    }
+
+    /**
+     * Add a label to an issue
+     */
+    async addLabelToIssue(repo: RepoInfo, issueNumber: number, labelName: string): Promise<boolean> {
+        if (!this.graphqlWithAuth) throw new Error('Not authenticated');
+
+        try {
+            // Get the issue node ID and label ID
+            const response: {
+                repository: {
+                    issue: { id: string } | null;
+                    label: { id: string } | null;
+                };
+            } = await this.graphqlWithAuth(`
+                query($owner: String!, $name: String!, $number: Int!, $labelName: String!) {
+                    repository(owner: $owner, name: $name) {
+                        issue(number: $number) {
+                            id
+                        }
+                        label(name: $labelName) {
+                            id
+                        }
+                    }
+                }
+            `, { owner: repo.owner, name: repo.name, number: issueNumber, labelName });
+
+            if (!response.repository.issue || !response.repository.label) {
+                return false;
+            }
+
+            await this.graphqlWithAuth(`
+                mutation($issueId: ID!, $labelIds: [ID!]!) {
+                    addLabelsToLabelable(input: { labelableId: $issueId, labelIds: $labelIds }) {
+                        clientMutationId
+                    }
+                }
+            `, {
+                issueId: response.repository.issue.id,
+                labelIds: [response.repository.label.id],
+            });
+
+            return true;
+        } catch (error) {
+            console.error('Failed to add label:', error);
+            return false;
+        }
+    }
+
+    /**
+     * Remove a label from an issue
+     */
+    async removeLabelFromIssue(repo: RepoInfo, issueNumber: number, labelName: string): Promise<boolean> {
+        if (!this.graphqlWithAuth) throw new Error('Not authenticated');
+
+        try {
+            const response: {
+                repository: {
+                    issue: { id: string } | null;
+                    label: { id: string } | null;
+                };
+            } = await this.graphqlWithAuth(`
+                query($owner: String!, $name: String!, $number: Int!, $labelName: String!) {
+                    repository(owner: $owner, name: $name) {
+                        issue(number: $number) {
+                            id
+                        }
+                        label(name: $labelName) {
+                            id
+                        }
+                    }
+                }
+            `, { owner: repo.owner, name: repo.name, number: issueNumber, labelName });
+
+            if (!response.repository.issue || !response.repository.label) {
+                return false;
+            }
+
+            await this.graphqlWithAuth(`
+                mutation($issueId: ID!, $labelIds: [ID!]!) {
+                    removeLabelsFromLabelable(input: { labelableId: $issueId, labelIds: $labelIds }) {
+                        clientMutationId
+                    }
+                }
+            `, {
+                issueId: response.repository.issue.id,
+                labelIds: [response.repository.label.id],
+            });
+
+            return true;
+        } catch (error) {
+            console.error('Failed to remove label:', error);
+            return false;
+        }
+    }
+
+    /**
+     * Find all issues with a specific label
+     */
+    async findIssuesWithLabel(repo: RepoInfo, labelName: string): Promise<number[]> {
+        if (!this.graphqlWithAuth) throw new Error('Not authenticated');
+
+        try {
+            const response: {
+                repository: {
+                    issues: {
+                        nodes: Array<{ number: number }>;
+                    };
+                };
+            } = await this.graphqlWithAuth(`
+                query($owner: String!, $name: String!, $labels: [String!]) {
+                    repository(owner: $owner, name: $name) {
+                        issues(first: 10, labels: $labels, states: [OPEN]) {
+                            nodes {
+                                number
+                            }
+                        }
+                    }
+                }
+            `, { owner: repo.owner, name: repo.name, labels: [labelName] });
+
+            return response.repository.issues.nodes.map(i => i.number);
+        } catch {
+            return [];
+        }
+    }
+
+    /**
+     * Get available issue types for a repository
+     */
+    async getIssueTypes(repo: RepoInfo): Promise<Array<{ id: string; name: string }>> {
+        if (!this.graphqlWithAuth) throw new Error('Not authenticated');
+
+        try {
+            const response: {
+                repository: {
+                    issueTypes: {
+                        nodes: Array<{ id: string; name: string }>;
+                    } | null;
+                };
+            } = await this.graphqlWithAuth(`
+                query($owner: String!, $name: String!) {
+                    repository(owner: $owner, name: $name) {
+                        issueTypes(first: 20) {
+                            nodes {
+                                id
+                                name
+                            }
+                        }
+                    }
+                }
+            `, { owner: repo.owner, name: repo.name });
+
+            return response.repository.issueTypes?.nodes || [];
+        } catch (error) {
+            // Issue types may not be enabled for this repository
+            return [];
+        }
+    }
+
+    /**
+     * Set the issue type on an issue
+     */
+    async setIssueType(repo: RepoInfo, issueNumber: number, issueTypeId: string): Promise<boolean> {
+        if (!this.graphqlWithAuth) throw new Error('Not authenticated');
+
+        try {
+            // First get the issue's node ID
+            const issueResponse: {
+                repository: {
+                    issue: { id: string } | null;
+                };
+            } = await this.graphqlWithAuth(`
+                query($owner: String!, $name: String!, $number: Int!) {
+                    repository(owner: $owner, name: $name) {
+                        issue(number: $number) {
+                            id
+                        }
+                    }
+                }
+            `, { owner: repo.owner, name: repo.name, number: issueNumber });
+
+            if (!issueResponse.repository.issue) {
+                return false;
+            }
+
+            // Update the issue type
+            await this.graphqlWithAuth(`
+                mutation($issueId: ID!, $issueTypeId: ID!) {
+                    updateIssue(input: { id: $issueId, issueTypeId: $issueTypeId }) {
+                        issue {
+                            id
+                        }
+                    }
+                }
+            `, {
+                issueId: issueResponse.repository.issue.id,
+                issueTypeId,
+            });
+
+            return true;
+        } catch (error) {
+            console.error('Failed to set issue type:', error);
+            return false;
         }
     }
 }

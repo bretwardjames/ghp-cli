@@ -11,6 +11,8 @@ export interface ProjectItem {
     type: 'issue' | 'pull_request' | 'draft';
     issueType: string | null;
     status: string | null;
+    statusIndex: number;  // Position in project's status order (for sorting)
+    state: 'open' | 'closed' | 'merged' | null;  // Issue/PR state (null for drafts)
     assignees: string[];
     labels: Array<{ name: string; color: string }>;
     repository: string | null;

@@ -21,6 +21,9 @@ export interface Config {
     startWorkingStatus: string;
     doneStatus: string;
 
+    // Display settings
+    columns?: string;  // comma-separated column names: number,type,title,assignees,status,priority,size,labels,project,repository
+
     // Command defaults
     defaults?: {
         plan?: PlanShortcut;

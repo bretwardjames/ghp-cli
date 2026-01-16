@@ -4,6 +4,7 @@ import { promisify } from 'util';
 import { api } from '../github-api.js';
 import { detectRepository, getCurrentBranch, hasUncommittedChanges, branchExists, createBranch, checkoutBranch, getCommitsBehind, pullLatest, generateBranchName } from '../git-utils.js';
 import { getConfig } from '../config.js';
+import { linkBranch } from '../branch-linker.js';
 import * as readline from 'readline';
 
 const execAsync = promisify(exec);
@@ -140,6 +141,10 @@ export async function startCommand(issue: string, options: StartOptions): Promis
                 process.exit(1);
             }
         }
+
+        // Link branch to issue
+        linkBranch(branchName, item.number!, item.title, item.id, repo.fullName);
+        console.log(chalk.green('✓'), `Linked branch to #${item.number}`);
     }
 
     // Status update (unless --no-status)
@@ -166,6 +171,27 @@ export async function startCommand(issue: string, options: StartOptions): Promis
                 }
             }
         }
+    }
+
+    // Apply active label
+    const activeLabel = api.getActiveLabelName();
+
+    // Ensure the label exists
+    await api.ensureLabel(repo, activeLabel);
+
+    // Remove label from any other issues that have it
+    const issuesWithLabel = await api.findIssuesWithLabel(repo, activeLabel);
+    for (const otherIssue of issuesWithLabel) {
+        if (otherIssue !== issueNumber) {
+            await api.removeLabelFromIssue(repo, otherIssue, activeLabel);
+            console.log(chalk.dim(`Removed ${activeLabel} from #${otherIssue}`));
+        }
+    }
+
+    // Add label to current issue
+    const labelAdded = await api.addLabelToIssue(repo, issueNumber, activeLabel);
+    if (labelAdded) {
+        console.log(chalk.green('✓'), `Applied "${activeLabel}" label`);
     }
 
     console.log();

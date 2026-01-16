@@ -41,6 +41,7 @@ export async function planCommand(shortcut?: string, command?: any): Promise<voi
                     if (sc.mine) parts.push('--mine');
                     if (sc.unassigned) parts.push('--unassigned');
                     if (sc.slice) parts.push(...sc.slice.map(s => `--slice ${s}`));
+                    if (sc.sort) parts.push(`--sort ${sc.sort}`);
                     console.log(`  ${chalk.cyan(name)}: ${parts.join(' ')}`);
                 }
             } else {
@@ -227,12 +228,37 @@ function getFieldValue(item: ProjectItem, fieldName: string): any {
 
     // Built-in fields
     switch (lower) {
-        case 'number': return item.number;
-        case 'title': return item.title;
-        case 'status': return item.status;
-        case 'type': return item.type;
+        case 'number':
+            return item.number;
+        case 'title':
+            return item.title;
+        case 'status':
+            return item.status;
+        case 'type':
+            return item.type;
+        case 'issuetype':
+        case 'issue-type':
+        case 'issue_type':
+            return item.issueType;
+        case 'assignee':
+        case 'assignees':
+        case 'user':
+            // Return first assignee for sorting, or empty string if none
+            return item.assignees[0] || '';
+        case 'repo':
+        case 'repository':
+            return item.repository;
+        case 'label':
+        case 'labels':
+            // Return first label name for sorting
+            return item.labels[0]?.name || '';
+        case 'project':
+            return item.projectTitle;
         default:
-            // Check custom fields
+            // Check custom fields (exact match first, then case-insensitive)
+            if (item.fields[fieldName]) {
+                return item.fields[fieldName];
+            }
             const customField = Object.entries(item.fields || {}).find(
                 ([k]) => k.toLowerCase() === lower
             );
@@ -258,47 +284,105 @@ function displayListView(items: ProjectItem[], status: string, opts: PlanOptions
         return;
     }
 
-    for (const item of items) {
+    // Build rows with raw data for width calculation
+    const rows: Array<{
+        num: string;
+        type: string;
+        title: string;
+        assignees: string;
+        priority: string;
+        size: string;
+        labels: Array<{ name: string; color: string }>;
+    }> = items.map(item => ({
+        num: item.number ? `#${item.number}` : 'draft',
+        type: item.issueType || '',
+        title: item.title,
+        assignees: item.assignees.map(a => '@' + a).join(' '),
+        priority: item.fields['Priority'] || item.fields['priority'] || '',
+        size: item.fields['Size'] || item.fields['size'] || item.fields['Estimate'] || item.fields['estimate'] || '',
+        labels: item.labels,
+    }));
+
+    // Calculate column widths
+    const numWidth = Math.max(...rows.map(r => r.num.length), 5);
+    const typeWidth = Math.max(...rows.map(r => r.type.length), 0);
+    const assigneeWidth = Math.max(...rows.map(r => r.assignees.length), 0);
+    const priorityWidth = Math.max(...rows.map(r => r.priority.length), 0);
+    const sizeWidth = Math.max(...rows.map(r => r.size.length), 0);
+
+    // Calculate title width (remaining space, min 20, max 60)
+    const termWidth = process.stdout.columns || 120;
+    const fixedWidth = numWidth + typeWidth + assigneeWidth + priorityWidth + sizeWidth + 12; // spacing
+    const titleWidth = Math.max(20, Math.min(60, termWidth - fixedWidth - 4));
+
+    // Print header row
+    const headerParts: string[] = [];
+    headerParts.push(chalk.dim('#'.padEnd(numWidth)));
+    if (typeWidth > 0) {
+        headerParts.push(chalk.dim('Type'.padEnd(typeWidth)));
+    }
+    headerParts.push(chalk.dim('Title'.padEnd(titleWidth)));
+    if (assigneeWidth > 0) {
+        headerParts.push(chalk.dim('Assignee'.padEnd(assigneeWidth)));
+    }
+    if (priorityWidth > 0) {
+        headerParts.push(chalk.dim('Priority'.padEnd(priorityWidth)));
+    }
+    if (sizeWidth > 0) {
+        headerParts.push(chalk.dim('Size'.padEnd(sizeWidth)));
+    }
+    const hasLabels = rows.some(r => r.labels.length > 0);
+    if (hasLabels) {
+        headerParts.push(chalk.dim('Labels'));
+    }
+    console.log(`  ${headerParts.join('  ')}`);
+    console.log(chalk.dim('  ' + '─'.repeat(Math.min(termWidth - 4, fixedWidth + titleWidth + 10))));
+
+    // Print rows
+    for (const row of rows) {
         const parts: string[] = [];
 
-        // #123
-        parts.push(item.number ? chalk.cyan(`#${item.number}`) : chalk.dim('draft'));
+        // Number
+        parts.push(row.num === 'draft'
+            ? chalk.dim(row.num.padEnd(numWidth))
+            : chalk.cyan(row.num.padEnd(numWidth)));
 
-        // Issue Type (org-level)
-        if (item.issueType) {
-            parts.push(chalk.yellow(item.issueType));
+        // Issue Type
+        if (typeWidth > 0) {
+            parts.push(chalk.yellow(row.type.padEnd(typeWidth)));
         }
 
-        // Title
-        parts.push(item.title);
+        // Title (truncated if needed)
+        const truncTitle = row.title.length > titleWidth
+            ? row.title.substring(0, titleWidth - 1) + '…'
+            : row.title.padEnd(titleWidth);
+        parts.push(truncTitle);
 
-        // @assignees
-        if (item.assignees.length > 0) {
-            parts.push(item.assignees.map(a => chalk.cyan('@' + a)).join(' '));
+        // Assignees
+        if (assigneeWidth > 0) {
+            parts.push(chalk.cyan(row.assignees.padEnd(assigneeWidth)));
         }
 
-        // Priority (if exists)
-        const priority = item.fields['Priority'] || item.fields['priority'];
-        if (priority) {
-            parts.push(chalk.magenta(priority));
+        // Priority
+        if (priorityWidth > 0) {
+            parts.push(chalk.magenta(row.priority.padEnd(priorityWidth)));
         }
 
-        // Size (if exists)
-        const size = item.fields['Size'] || item.fields['size'] || item.fields['Estimate'] || item.fields['estimate'];
-        if (size) {
-            parts.push(chalk.blue(size));
+        // Size
+        if (sizeWidth > 0) {
+            parts.push(chalk.blue(row.size.padEnd(sizeWidth)));
         }
 
-        // Labels
-        if (item.labels.length > 0) {
-            const labelStr = item.labels.map(l => {
+        // Labels (not padded, at the end)
+        if (row.labels.length > 0) {
+            const labelStr = row.labels.map(l => {
                 const bg = hexToChalk(l.color);
                 return bg(` ${l.name} `);
             }).join(' ');
             parts.push(labelStr);
         }
 
-        console.log(`  ${parts.join(' ')}`);
+        console.log(`  ${parts.join('  ')}`);
     }
     console.log();
 }

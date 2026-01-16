@@ -11,6 +11,7 @@ export interface PlanShortcut {
     unassigned?: boolean;
     slice?: string[];
     project?: string;
+    sort?: string;
 }
 
 export interface Config {

@@ -23,6 +23,9 @@ export {
     sanitizeForBranchName,
     generateBranchName,
     getDefaultBranch,
+    getLocalBranches,
+    getRemoteBranches,
+    getAllBranches,
     parseGitHubUrl,
 } from '@bretwardjames/ghp-core';
 

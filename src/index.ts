@@ -25,7 +25,7 @@ const program = new Command();
 program
     .name('ghp')
     .description('GitHub Projects CLI - manage project boards from your terminal')
-    .version('0.1.0');
+    .version('0.1.3');
 
 // Authentication
 program

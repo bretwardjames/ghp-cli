@@ -181,16 +181,28 @@ export async function addIssueCommand(title: string, options: AddIssueOptions): 
 
     // Open editor if: using template (always), -e flag, or no body provided
     if (usingTemplate || options.edit || !options.body) {
-        const header = `# ${title || 'Issue Title'}\n\n`;
+        const instructions = [
+            `# ${title || '<Replace with issue title>'}`,
+            '',
+            '<!-- ─────────────────────────────────────────────',
+            '     First line (after #) = Issue title',
+            '     Everything below = Issue description',
+            '     These comment lines will be removed',
+            '───────────────────────────────────────────────── -->',
+            '',
+        ].join('\n');
         try {
-            const edited = await openEditor(header + body);
+            const edited = await openEditor(instructions + body);
             // Extract title from first line if it changed
             const lines = edited.split('\n');
             if (lines[0].startsWith('# ')) {
                 title = lines[0].slice(2).trim();
-                body = lines.slice(1).join('\n').trim();
+                // Remove comment block and get body
+                body = lines.slice(1).join('\n')
+                    .replace(/<!--[\s\S]*?-->/g, '') // Remove HTML comments
+                    .trim();
             } else {
-                body = edited.trim();
+                body = edited.replace(/<!--[\s\S]*?-->/g, '').trim();
             }
         } catch (err) {
             console.error(chalk.red('Error:'), 'Editor failed:', err);
@@ -199,7 +211,7 @@ export async function addIssueCommand(title: string, options: AddIssueOptions): 
     }
 
     // Validate title
-    if (!title || title === 'Issue Title') {
+    if (!title || title === 'Issue Title' || title === '<Replace with issue title>') {
         console.error(chalk.red('Error:'), 'Issue title is required');
         process.exit(1);
     }

@@ -1,14 +1,16 @@
 import chalk from 'chalk';
 import { api } from '../github-api.js';
 import { detectRepository } from '../git-utils.js';
-import { getConfig } from '../config.js';
+import { getConfig, getWorkDefaults } from '../config.js';
 import { displayTable, parseColumns, DEFAULT_COLUMNS, calculateColumnWidths, displayTableWithWidths, type ColumnName } from '../table.js';
 import { getBranchForIssue } from '../branch-linker.js';
 import type { ProjectItem, RepoInfo } from '../types.js';
 
 interface WorkOptions {
     all?: boolean;
-    status?: string;
+    mine?: boolean;
+    unassigned?: boolean;
+    status?: string | string[];
     hideDone?: boolean;
     list?: boolean;
     flat?: boolean;
@@ -16,9 +18,28 @@ interface WorkOptions {
     sort?: string;
     slice?: string[];
     filter?: string[];
+    project?: string;
 }
 
-export async function workCommand(options: WorkOptions): Promise<void> {
+export async function workCommand(cliOptions: WorkOptions): Promise<void> {
+    // Load defaults and merge with CLI options
+    // Filter out undefined CLI options so they don't override defaults
+    const definedCliOptions = Object.fromEntries(
+        Object.entries(cliOptions).filter(([_, v]) => v !== undefined)
+    ) as WorkOptions;
+
+    const defaults = getWorkDefaults();
+    const options: WorkOptions = {
+        ...defaults,
+        ...definedCliOptions,
+        // Merge slice arrays
+        slice: [...(defaults.slice || []), ...(definedCliOptions.slice || [])],
+    };
+    // CLI status overrides default status (don't merge)
+    if (definedCliOptions.status !== undefined) {
+        options.status = definedCliOptions.status;
+    }
+
     // Detect repository
     const repo = await detectRepository();
     if (!repo) {
@@ -55,15 +76,39 @@ export async function workCommand(options: WorkOptions): Promise<void> {
 
     // Filter to assigned to me (default unless --all)
     if (!options.all) {
-        filteredItems = filteredItems.filter(item => 
+        filteredItems = filteredItems.filter(item =>
             item.assignees.includes(api.username || '')
         );
     }
 
-    // Filter by status
-    if (options.status) {
+    // --mine: filter to only assigned to me (useful with --all)
+    if (options.mine) {
         filteredItems = filteredItems.filter(item =>
-            item.status?.toLowerCase() === options.status?.toLowerCase()
+            item.assignees.includes(api.username || '')
+        );
+    }
+
+    // --unassigned: filter to unassigned items
+    if (options.unassigned) {
+        filteredItems = filteredItems.filter(item =>
+            item.assignees.length === 0
+        );
+    }
+
+    // --project: filter to specific project
+    if (options.project) {
+        filteredItems = filteredItems.filter(item =>
+            item.projectTitle.toLowerCase().includes(options.project!.toLowerCase())
+        );
+    }
+
+    // Filter by status (can be string or array)
+    if (options.status) {
+        const statusList = Array.isArray(options.status)
+            ? options.status.map(s => s.toLowerCase())
+            : [options.status.toLowerCase()];
+        filteredItems = filteredItems.filter(item =>
+            item.status && statusList.includes(item.status.toLowerCase())
         );
     }
 

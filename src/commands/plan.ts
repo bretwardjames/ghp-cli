@@ -7,7 +7,7 @@ import type { ProjectItem } from '../types.js';
 
 interface PlanOptions {
     project?: string;
-    status?: string;
+    status?: string | string[];
     mine?: boolean;
     unassigned?: boolean;
     list?: boolean;

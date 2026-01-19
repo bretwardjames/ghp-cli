@@ -18,12 +18,29 @@ const WORKSPACE_CONFIG_DIR = '.ghp';
 const WORKSPACE_CONFIG_FILE = 'config.json';
 
 export interface PlanShortcut {
-    status?: string;
+    status?: string | string[];
     mine?: boolean;
     unassigned?: boolean;
     slice?: string[];
     project?: string;
     sort?: string;
+    list?: boolean;
+    all?: boolean;
+    group?: string;
+}
+
+export interface WorkDefaults {
+    status?: string | string[];
+    mine?: boolean;
+    unassigned?: boolean;
+    slice?: string[];
+    project?: string;
+    sort?: string;
+    list?: boolean;
+    all?: boolean;
+    group?: string;
+    // work-specific
+    hideDone?: boolean;
 }
 
 export interface Config {
@@ -39,6 +56,7 @@ export interface Config {
     // Command defaults
     defaults?: {
         plan?: PlanShortcut;
+        work?: WorkDefaults;
         addIssue?: {
             template?: string;  // default template name from .github/ISSUE_TEMPLATE/
             project?: string;   // default project
@@ -226,6 +244,11 @@ export function listShortcuts(): Record<string, PlanShortcut> {
 export function getPlanDefaults(): PlanShortcut {
     const config = loadConfig();
     return config.defaults?.plan || {};
+}
+
+export function getWorkDefaults(): WorkDefaults {
+    const config = loadConfig();
+    return config.defaults?.work || {};
 }
 
 export function setPlanDefaults(defaults: PlanShortcut): void {

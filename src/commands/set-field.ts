@@ -1,17 +1,28 @@
 import chalk from 'chalk';
 import { api } from '../github-api.js';
-import { detectRepository } from '../git-utils.js';
+import { resolveTargetRepo } from '../config.js';
 
-export async function setFieldCommand(issue: string, field: string, value: string): Promise<void> {
+interface SetFieldOptions {
+    repo?: string;
+}
+
+export async function setFieldCommand(issue: string, field: string, value: string, options: SetFieldOptions): Promise<void> {
     const issueNumber = parseInt(issue, 10);
     if (isNaN(issueNumber)) {
         console.error(chalk.red('Error:'), 'Issue must be a number');
         process.exit(1);
     }
 
-    const repo = await detectRepository();
+    // Resolve target repository (--repo flag > config.defaultRepo > detect from cwd)
+    const repo = await resolveTargetRepo(options.repo);
     if (!repo) {
-        console.error(chalk.red('Error:'), 'Not in a git repository with a GitHub remote');
+        if (options.repo) {
+            console.error(chalk.red('Error:'), `Invalid repo format: ${options.repo}`);
+            console.log(chalk.dim('Expected format: owner/name (e.g., bretwardjames/ghp-core)'));
+        } else {
+            console.error(chalk.red('Error:'), 'Could not determine target repository.');
+            console.log(chalk.dim('Use --repo owner/name or set defaultRepo in config'));
+        }
         process.exit(1);
     }
 
@@ -52,7 +63,17 @@ export async function setFieldCommand(issue: string, field: string, value: strin
     }
 
     // Find the item in a project (needed for project field updates)
-    const item = await api.findItemByNumber(repo, issueNumber);
+    let item;
+    try {
+        item = await api.findItemByNumber(repo, issueNumber);
+    } catch (error) {
+        if (error instanceof Error && error.message.includes('Repository not found')) {
+            console.error(chalk.red('Error:'), `Repository not found: ${repo.owner}/${repo.name}`);
+            console.log(chalk.dim('Check that the repository exists and you have access to it.'));
+            process.exit(1);
+        }
+        throw error;
+    }
     if (!item) {
         console.error(chalk.red('Error:'), `Issue #${issueNumber} not found in any project`);
         process.exit(1);

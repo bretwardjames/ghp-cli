@@ -5,6 +5,7 @@ import { spawn } from 'child_process';
 import { writeFileSync, readFileSync, unlinkSync, existsSync, readdirSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import { parseIssueMetadata, parseFieldsOption, type IssueMetadata } from '@bretwardjames/ghp-core';
 
 interface AddIssueOptions {
     body?: string;
@@ -14,6 +15,10 @@ interface AddIssueOptions {
     template?: string;
     listTemplates?: boolean;
     repo?: string;
+    labels?: string;
+    assignees?: string;
+    type?: string;
+    fields?: string;
 }
 
 async function openEditor(initialContent: string): Promise<string> {
@@ -223,8 +228,28 @@ export async function addIssueCommand(title: string, options: AddIssueOptions): 
         process.exit(1);
     }
 
-    // Determine status (CLI > config default > interactive picker)
-    let statusName = options.status || defaults.status;
+    // Parse metadata from body frontmatter
+    const { metadata: frontmatterMetadata, body: cleanBody } = parseIssueMetadata(body);
+    body = cleanBody;
+
+    // Merge CLI options with frontmatter (CLI takes precedence)
+    const metadata: IssueMetadata = {
+        labels: options.labels
+            ? options.labels.split(',').map(l => l.trim()).filter(Boolean)
+            : frontmatterMetadata.labels,
+        assignees: options.assignees
+            ? options.assignees.split(',').map(a => a.trim()).filter(Boolean)
+            : frontmatterMetadata.assignees,
+        type: options.type || frontmatterMetadata.type,
+        fields: options.fields
+            ? { ...frontmatterMetadata.fields, ...parseFieldsOption(options.fields) }
+            : frontmatterMetadata.fields,
+    };
+
+    // Determine status (CLI > frontmatter > config default > interactive picker)
+    let statusName = options.status || metadata.fields.status || defaults.status;
+    // Remove status from fields since we handle it separately
+    delete metadata.fields.status;
     const statusField = await api.getStatusField(project.id);
 
     if (!statusName && statusField && statusField.options.length > 0) {
@@ -259,6 +284,39 @@ export async function addIssueCommand(title: string, options: AddIssueOptions): 
 
     console.log(chalk.green('Created:'), `#${issue.number} ${title}`);
 
+    // Apply labels
+    if (metadata.labels.length > 0) {
+        for (const label of metadata.labels) {
+            await api.ensureLabel(repo, label);
+            await api.addLabelToIssue(repo, issue.number, label);
+        }
+        console.log(chalk.green('Labels:'), metadata.labels.join(', '));
+    }
+
+    // Apply assignees
+    if (metadata.assignees.length > 0) {
+        const success = await api.updateAssignees(repo, issue.number, metadata.assignees);
+        if (success) {
+            console.log(chalk.green('Assignees:'), metadata.assignees.join(', '));
+        }
+    }
+
+    // Apply issue type
+    if (metadata.type) {
+        const issueTypes = await api.getIssueTypes(repo);
+        const issueType = issueTypes.find(t =>
+            t.name.toLowerCase() === metadata.type!.toLowerCase()
+        );
+        if (issueType) {
+            const success = await api.setIssueType(repo, issue.number, issueType.id);
+            if (success) {
+                console.log(chalk.green('Type:'), metadata.type);
+            }
+        } else if (issueTypes.length > 0) {
+            console.log(chalk.yellow('Warning:'), `Issue type "${metadata.type}" not found`);
+        }
+    }
+
     // Add to project
     const itemId = await api.addToProject(project.id, issue.id);
     if (!itemId) {
@@ -278,6 +336,45 @@ export async function addIssueCommand(title: string, options: AddIssueOptions): 
             console.log(chalk.green('Status:'), statusName);
         } else {
             console.log(chalk.yellow('Warning:'), `Status "${statusName}" not found`);
+        }
+    }
+
+    // Set other project fields
+    const fieldEntries = Object.entries(metadata.fields);
+    if (fieldEntries.length > 0) {
+        const projectFields = await api.getProjectFields(project.id);
+        for (const [fieldName, fieldValue] of fieldEntries) {
+            const field = projectFields.find(f =>
+                f.name.toLowerCase() === fieldName.toLowerCase()
+            );
+            if (field) {
+                // Build the correct value object based on field type
+                let value: { text?: string; number?: number; singleSelectOptionId?: string };
+
+                if (field.options && field.options.length > 0) {
+                    // Single-select field - find the matching option
+                    const option = field.options.find(o =>
+                        o.name.toLowerCase() === fieldValue.toLowerCase()
+                    );
+                    if (!option) {
+                        console.log(chalk.yellow('Warning:'), `Option "${fieldValue}" not found for field "${field.name}"`);
+                        continue;
+                    }
+                    value = { singleSelectOptionId: option.id };
+                } else if (field.type === 'NUMBER') {
+                    value = { number: parseFloat(fieldValue) };
+                } else {
+                    // Text field
+                    value = { text: fieldValue };
+                }
+
+                const success = await api.setFieldValue(project.id, itemId, field.id, value);
+                if (success) {
+                    console.log(chalk.green(`${field.name}:`), fieldValue);
+                }
+            } else {
+                console.log(chalk.yellow('Warning:'), `Field "${fieldName}" not found`);
+            }
         }
     }
 

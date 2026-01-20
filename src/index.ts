@@ -155,6 +155,10 @@ program
     .option('-t, --template <name>', 'Use an issue template from .github/ISSUE_TEMPLATE/')
     .option('--list-templates', 'List available issue templates')
     .option('-r, --repo <owner/name>', 'Target repository (overrides config and auto-detect)')
+    .option('-l, --labels <labels>', 'Comma-separated labels to add')
+    .option('-a, --assignees <users>', 'Comma-separated users to assign')
+    .option('--type <type>', 'Issue type (Bug, Feature, etc.)')
+    .option('--fields <key=value,...>', 'Project fields (key=value,key=value)')
     .action(addIssueCommand);
 
 // Field management

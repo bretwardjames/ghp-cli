@@ -2,8 +2,8 @@ import chalk from 'chalk';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { api } from '../github-api.js';
-import { detectRepository, getCurrentBranch, hasUncommittedChanges, branchExists, createBranch, checkoutBranch, getCommitsBehind, pullLatest, generateBranchName, getAllBranches, type RepoInfo } from '../git-utils.js';
-import { getConfig } from '../config.js';
+import { getCurrentBranch, hasUncommittedChanges, branchExists, createBranch, checkoutBranch, getCommitsBehind, pullLatest, generateBranchName, getAllBranches, type RepoInfo } from '../git-utils.js';
+import { getConfig, resolveTargetRepo, getActiveLabelScope } from '../config.js';
 import { linkBranch, getBranchForIssue } from '../branch-linker.js';
 import * as readline from 'readline';
 
@@ -12,6 +12,7 @@ const execAsync = promisify(exec);
 interface StartOptions {
     branch?: boolean;
     status?: boolean;
+    repo?: string;
 }
 
 function prompt(question: string): Promise<string> {
@@ -77,25 +78,31 @@ async function handleUncommittedChanges(): Promise<boolean> {
 
 /**
  * Apply the "actively working" label to an issue and remove from others.
+ * Scope is determined by config: 'repo' = per-repo, 'project' = one active across all repos.
  */
-async function applyActiveLabel(repo: RepoInfo, issueNumber: number): Promise<void> {
+async function applyActiveLabel(repo: RepoInfo, issueNumber: number, projectId?: string): Promise<void> {
     const activeLabel = api.getActiveLabelName();
+    const scope = getActiveLabelScope();
 
-    // Ensure the label exists
-    await api.ensureLabel(repo, activeLabel);
+    const result = await api.transferActiveLabel({
+        repo,
+        issueNumber,
+        scope,
+        projectId,
+        labelName: activeLabel,
+    });
 
-    // Remove label from any other issues that have it
-    const issuesWithLabel = await api.findIssuesWithLabel(repo, activeLabel);
-    for (const otherIssue of issuesWithLabel) {
-        if (otherIssue !== issueNumber) {
-            await api.removeLabelFromIssue(repo, otherIssue, activeLabel);
-            console.log(chalk.dim(`Removed ${activeLabel} from #${otherIssue}`));
+    // Log what was removed
+    for (const item of result.removed) {
+        if (scope === 'project') {
+            console.log(chalk.dim(`Removed ${activeLabel} from ${item.repo.fullName}#${item.number}`));
+        } else {
+            console.log(chalk.dim(`Removed ${activeLabel} from #${item.number}`));
         }
     }
 
-    // Add label to current issue
-    const labelAdded = await api.addLabelToIssue(repo, issueNumber, activeLabel);
-    if (labelAdded) {
+    // Log if label was added
+    if (result.added) {
         console.log(chalk.green('✓'), `Applied "${activeLabel}" label`);
     }
 }
@@ -170,10 +177,16 @@ export async function startCommand(issue: string, options: StartOptions): Promis
         process.exit(1);
     }
 
-    // Detect repository
-    const repo = await detectRepository();
+    // Resolve target repository (--repo flag > config.defaultRepo > detect from cwd)
+    const repo = await resolveTargetRepo(options.repo);
     if (!repo) {
-        console.error(chalk.red('Error:'), 'Not in a git repository with a GitHub remote');
+        if (options.repo) {
+            console.error(chalk.red('Error:'), `Invalid repo format: ${options.repo}`);
+            console.log(chalk.dim('Expected format: owner/name (e.g., bretwardjames/ghp-core)'));
+        } else {
+            console.error(chalk.red('Error:'), 'Could not determine target repository.');
+            console.log(chalk.dim('Use --repo owner/name or set defaultRepo in config'));
+        }
         process.exit(1);
     }
 
@@ -186,7 +199,17 @@ export async function startCommand(issue: string, options: StartOptions): Promis
 
     // Find the item
     console.log(chalk.dim(`Looking for issue #${issueNumber}...`));
-    const item = await api.findItemByNumber(repo, issueNumber);
+    let item;
+    try {
+        item = await api.findItemByNumber(repo, issueNumber);
+    } catch (error) {
+        if (error instanceof Error && error.message.includes('Repository not found')) {
+            console.error(chalk.red('Error:'), `Repository not found: ${repo.owner}/${repo.name}`);
+            console.log(chalk.dim('Check that the repository exists and you have access to it.'));
+            process.exit(1);
+        }
+        throw error;
+    }
     if (!item) {
         console.error(chalk.red('Error:'), `Issue #${issueNumber} not found in any project`);
         process.exit(1);
@@ -385,7 +408,7 @@ export async function startCommand(issue: string, options: StartOptions): Promis
     // ═══════════════════════════════════════════════════════════════════════════
     // Apply active label
     // ═══════════════════════════════════════════════════════════════════════════
-    await applyActiveLabel(repo, issueNumber);
+    await applyActiveLabel(repo, issueNumber, item.projectId);
 
     console.log();
     console.log(chalk.green.bold('Ready to work on:'), item.title);

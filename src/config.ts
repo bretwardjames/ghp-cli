@@ -5,8 +5,10 @@ import { execSync } from 'child_process';
 import {
     type SyncableSettings,
     type SyncableSettingKey,
+    type RepoInfo,
     VSCODE_TO_CLI_MAP,
     CLI_TO_VSCODE_MAP,
+    detectRepository,
 } from '@bretwardjames/ghp-core';
 
 // User config (personal overrides)
@@ -50,6 +52,14 @@ export interface Config {
     startWorkingStatus: string;
     doneStatus: string;
 
+    // Multi-repo support
+    defaultRepo?: string;  // Default repo for multi-repo projects (format: "owner/name")
+
+    // Active label settings
+    activeLabel?: {
+        scope: 'repo' | 'project';  // 'repo' = per-repo (default), 'project' = one active per project
+    };
+
     // Display settings
     columns?: string;  // comma-separated column names: number,type,title,assignees,status,priority,size,labels,project,repository
 
@@ -75,6 +85,9 @@ const DEFAULT_CONFIG: Config = {
     branchPattern: '{user}/{number}-{title}',
     startWorkingStatus: 'In Progress',
     doneStatus: 'Done',
+    activeLabel: {
+        scope: 'repo',  // 'repo' = each repo manages its own active label, 'project' = one active across all repos
+    },
     defaults: {},
     shortcuts: {},
 };
@@ -160,15 +173,16 @@ function deepMerge(base: Config, override: Partial<Config>): Config {
 }
 
 /**
- * Load merged config: defaults → workspace → user
- * User settings override workspace, workspace overrides defaults
+ * Load merged config: defaults → user → workspace
+ * Workspace settings override user, user overrides defaults
+ * (Local config takes priority over global)
  */
 export function loadConfig(): Config {
     const workspaceConfig = loadWorkspaceConfig();
     const userConfig = loadUserConfig();
 
-    // Merge: defaults → workspace → user
-    const merged = deepMerge(deepMerge(DEFAULT_CONFIG, workspaceConfig), userConfig);
+    // Merge: defaults → user → workspace (workspace wins)
+    const merged = deepMerge(deepMerge(DEFAULT_CONFIG, userConfig), workspaceConfig);
     return merged;
 }
 
@@ -275,7 +289,12 @@ export function getAddIssueDefaults(): { template?: string; project?: string; st
     return config.defaults?.addIssue || {};
 }
 
-export const CONFIG_KEYS = ['mainBranch', 'branchPattern', 'startWorkingStatus', 'doneStatus', 'columns'] as const;
+export function getActiveLabelScope(): 'repo' | 'project' {
+    const config = loadConfig();
+    return config.activeLabel?.scope || 'repo';
+}
+
+export const CONFIG_KEYS = ['mainBranch', 'branchPattern', 'startWorkingStatus', 'doneStatus', 'columns', 'defaultRepo'] as const;
 
 export type ConfigSource = 'default' | 'workspace' | 'user';
 
@@ -291,11 +310,65 @@ export function listConfig(): Record<string, string | undefined> {
         branchPattern: config.branchPattern,
         startWorkingStatus: config.startWorkingStatus,
         doneStatus: config.doneStatus,
+        defaultRepo: config.defaultRepo,
     };
 }
 
 /**
- * List simple config values with their source (default, workspace, or user)
+ * Parse a repo string (owner/name) into RepoInfo
+ */
+export function parseRepoString(repoString: string): { owner: string; name: string; fullName: string } | null {
+    const parts = repoString.split('/');
+    if (parts.length !== 2 || !parts[0] || !parts[1]) {
+        return null;
+    }
+    return {
+        owner: parts[0],
+        name: parts[1],
+        fullName: repoString,
+    };
+}
+
+/**
+ * Get the default repo from config, parsed as RepoInfo
+ */
+export function getDefaultRepo(): { owner: string; name: string; fullName: string } | null {
+    const config = loadConfig();
+    if (!config.defaultRepo) return null;
+    return parseRepoString(config.defaultRepo);
+}
+
+/**
+ * Resolve the target repository using the priority chain:
+ * 1. --repo flag (if provided)
+ * 2. config.defaultRepo (if set)
+ * 3. detectRepository() from current directory
+ *
+ * Returns null if no repo can be determined.
+ */
+export async function resolveTargetRepo(repoFlag?: string): Promise<RepoInfo | null> {
+    // 1. Use --repo flag if provided
+    if (repoFlag) {
+        const parsed = parseRepoString(repoFlag);
+        if (!parsed) {
+            return null; // Invalid format
+        }
+        return parsed;
+    }
+
+    // 2. Use config.defaultRepo if set
+    const defaultRepo = getDefaultRepo();
+    if (defaultRepo) {
+        return defaultRepo;
+    }
+
+    // 3. Fall back to detecting from current directory
+    return await detectRepository();
+}
+
+/**
+ * List simple config values with their source (default, user, or workspace)
+ * Workspace takes priority over user (local over global)
  */
 export function listConfigWithSources(): Record<string, ConfigValueWithSource> {
     const userConfig = loadUserConfig();
@@ -304,10 +377,11 @@ export function listConfigWithSources(): Record<string, ConfigValueWithSource> {
     const result: Record<string, ConfigValueWithSource> = {};
 
     for (const key of CONFIG_KEYS) {
-        if (userConfig[key] !== undefined) {
-            result[key] = { value: userConfig[key] as string, source: 'user' };
-        } else if (workspaceConfig[key] !== undefined) {
+        // Workspace overrides user (local wins)
+        if (workspaceConfig[key] !== undefined) {
             result[key] = { value: workspaceConfig[key] as string, source: 'workspace' };
+        } else if (userConfig[key] !== undefined) {
+            result[key] = { value: userConfig[key] as string, source: 'user' };
         } else {
             result[key] = { value: DEFAULT_CONFIG[key] as string | undefined, source: 'default' };
         }
@@ -327,46 +401,47 @@ export interface FullConfigWithSources {
 
 /**
  * Get full config with sources for all sections
+ * Workspace takes priority over user (local over global)
  */
 export function getFullConfigWithSources(): FullConfigWithSources {
     const userConfig = loadUserConfig();
     const workspaceConfig = loadWorkspaceConfig();
     const mergedConfig = loadConfig();
 
-    // Simple settings
+    // Simple settings - workspace overrides user
     const settings: Record<string, ConfigValueWithSource> = {};
     for (const key of CONFIG_KEYS) {
-        if (userConfig[key] !== undefined) {
-            settings[key] = { value: userConfig[key] as string, source: 'user' };
-        } else if (workspaceConfig[key] !== undefined) {
+        if (workspaceConfig[key] !== undefined) {
             settings[key] = { value: workspaceConfig[key] as string, source: 'workspace' };
+        } else if (userConfig[key] !== undefined) {
+            settings[key] = { value: userConfig[key] as string, source: 'user' };
         } else {
             settings[key] = { value: DEFAULT_CONFIG[key] as string | undefined, source: 'default' };
         }
     }
 
-    // Defaults - plan
+    // Defaults - plan (workspace overrides user)
     let planSource: ConfigSource = 'default';
-    if (userConfig.defaults?.plan) planSource = 'user';
-    else if (workspaceConfig.defaults?.plan) planSource = 'workspace';
+    if (workspaceConfig.defaults?.plan) planSource = 'workspace';
+    else if (userConfig.defaults?.plan) planSource = 'user';
 
-    // Defaults - addIssue
+    // Defaults - addIssue (workspace overrides user)
     let addIssueSource: ConfigSource = 'default';
-    if (userConfig.defaults?.addIssue) addIssueSource = 'user';
-    else if (workspaceConfig.defaults?.addIssue) addIssueSource = 'workspace';
+    if (workspaceConfig.defaults?.addIssue) addIssueSource = 'workspace';
+    else if (userConfig.defaults?.addIssue) addIssueSource = 'user';
 
-    // Shortcuts - track source per shortcut
+    // Shortcuts - track source per shortcut (workspace overrides user)
     const shortcuts: Record<string, { value: PlanShortcut; source: ConfigSource }> = {};
     const allShortcutNames = new Set([
         ...Object.keys(workspaceConfig.shortcuts || {}),
         ...Object.keys(userConfig.shortcuts || {}),
     ]);
     for (const name of allShortcutNames) {
-        // User overrides workspace
-        if (userConfig.shortcuts?.[name]) {
-            shortcuts[name] = { value: userConfig.shortcuts[name], source: 'user' };
-        } else if (workspaceConfig.shortcuts?.[name]) {
+        // Workspace overrides user
+        if (workspaceConfig.shortcuts?.[name]) {
             shortcuts[name] = { value: workspaceConfig.shortcuts[name], source: 'workspace' };
+        } else if (userConfig.shortcuts?.[name]) {
+            shortcuts[name] = { value: userConfig.shortcuts[name], source: 'user' };
         }
     }
 

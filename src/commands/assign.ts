@@ -2,17 +2,18 @@ import chalk from 'chalk';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { api } from '../github-api.js';
-import { detectRepository } from '../git-utils.js';
+import { resolveTargetRepo } from '../config.js';
 
 const execAsync = promisify(exec);
 
 interface AssignOptions {
     remove?: boolean;
+    repo?: string;
 }
 
 export async function assignCommand(
-    issue: string, 
-    users: string[], 
+    issue: string,
+    users: string[],
     options: AssignOptions
 ): Promise<void> {
     const issueNumber = parseInt(issue, 10);
@@ -21,10 +22,16 @@ export async function assignCommand(
         process.exit(1);
     }
 
-    // Detect repository
-    const repo = await detectRepository();
+    // Resolve target repository (--repo flag > config.defaultRepo > detect from cwd)
+    const repo = await resolveTargetRepo(options.repo);
     if (!repo) {
-        console.error(chalk.red('Error:'), 'Not in a git repository with a GitHub remote');
+        if (options.repo) {
+            console.error(chalk.red('Error:'), `Invalid repo format: ${options.repo}`);
+            console.log(chalk.dim('Expected format: owner/name (e.g., bretwardjames/ghp-core)'));
+        } else {
+            console.error(chalk.red('Error:'), 'Could not determine target repository.');
+            console.log(chalk.dim('Use --repo owner/name or set defaultRepo in config'));
+        }
         process.exit(1);
     }
 

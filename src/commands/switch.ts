@@ -2,6 +2,7 @@ import chalk from 'chalk';
 import { api } from '../github-api.js';
 import { detectRepository, checkoutBranch, branchExists, getCurrentBranch } from '../git-utils.js';
 import { getBranchForIssue } from '../branch-linker.js';
+import { getActiveLabelScope } from '../config.js';
 
 export async function switchCommand(issue: string): Promise<void> {
     const issueNumber = parseInt(issue, 10);
@@ -54,22 +55,36 @@ export async function switchCommand(issue: string): Promise<void> {
         process.exit(1);
     }
 
-    // Update active label
+    // Update active label using core method
     const activeLabel = api.getActiveLabelName();
+    const scope = getActiveLabelScope();
 
-    // Remove label from any other issues that have it
-    const issuesWithLabel = await api.findIssuesWithLabel(repo, activeLabel);
-    for (const otherIssue of issuesWithLabel) {
-        if (otherIssue !== issueNumber) {
-            await api.removeLabelFromIssue(repo, otherIssue, activeLabel);
-            console.log(chalk.dim(`Removed ${activeLabel} from #${otherIssue}`));
+    // For project scope, we need to fetch the item to get projectId
+    let projectId: string | undefined;
+    if (scope === 'project') {
+        const item = await api.findItemByNumber(repo, issueNumber);
+        projectId = item?.projectId;
+    }
+
+    const result = await api.transferActiveLabel({
+        repo,
+        issueNumber,
+        scope,
+        projectId,
+        labelName: activeLabel,
+    });
+
+    // Log what was removed
+    for (const item of result.removed) {
+        if (scope === 'project') {
+            console.log(chalk.dim(`Removed ${activeLabel} from ${item.repo.fullName}#${item.number}`));
+        } else {
+            console.log(chalk.dim(`Removed ${activeLabel} from #${item.number}`));
         }
     }
 
-    // Add label to current issue (ensure it exists first)
-    await api.ensureLabel(repo, activeLabel);
-    const labelAdded = await api.addLabelToIssue(repo, issueNumber, activeLabel);
-    if (labelAdded) {
+    // Log if label was added
+    if (result.added) {
         console.log(chalk.green('✓'), `Applied "${activeLabel}" label`);
     }
 }

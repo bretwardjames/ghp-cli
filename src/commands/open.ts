@@ -1,17 +1,25 @@
 import chalk from 'chalk';
 import { api, type IssueDetails } from '../github-api.js';
-import { detectRepository } from '../git-utils.js';
+import { resolveTargetRepo } from '../config.js';
 import { parseBranchLink } from '@bretwardjames/ghp-core';
 import type { ProjectItem } from '../types.js';
 
 interface OpenOptions {
     browser?: boolean;
+    repo?: string;
 }
 
 export async function openCommand(issue: string, options: OpenOptions): Promise<void> {
-    const repo = await detectRepository();
+    // Resolve target repository (--repo flag > config.defaultRepo > detect from cwd)
+    const repo = await resolveTargetRepo(options.repo);
     if (!repo) {
-        console.error(chalk.red('Error:'), 'Not in a git repository with a GitHub remote');
+        if (options.repo) {
+            console.error(chalk.red('Error:'), `Invalid repo format: ${options.repo}`);
+            console.log(chalk.dim('Expected format: owner/name (e.g., bretwardjames/ghp-core)'));
+        } else {
+            console.error(chalk.red('Error:'), 'Could not determine target repository.');
+            console.log(chalk.dim('Use --repo owner/name or set defaultRepo in config'));
+        }
         process.exit(1);
     }
 
@@ -28,10 +36,20 @@ export async function openCommand(issue: string, options: OpenOptions): Promise<
     }
 
     // Fetch both project item data and full issue details in parallel
-    const [item, details] = await Promise.all([
-        api.findItemByNumber(repo, issueNumber),
-        api.getIssueDetails(repo, issueNumber),
-    ]);
+    let item, details;
+    try {
+        [item, details] = await Promise.all([
+            api.findItemByNumber(repo, issueNumber),
+            api.getIssueDetails(repo, issueNumber),
+        ]);
+    } catch (error) {
+        if (error instanceof Error && error.message.includes('Repository not found')) {
+            console.error(chalk.red('Error:'), `Repository not found: ${repo.owner}/${repo.name}`);
+            console.log(chalk.dim('Check that the repository exists and you have access to it.'));
+            process.exit(1);
+        }
+        throw error;
+    }
 
     if (!details) {
         console.error(chalk.red('Issue not found:'), `#${issueNumber}`);

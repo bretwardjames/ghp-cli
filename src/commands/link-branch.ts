@@ -2,6 +2,7 @@ import chalk from 'chalk';
 import { api } from '../github-api.js';
 import { detectRepository, getCurrentBranch } from '../git-utils.js';
 import { linkBranch, getBranchForIssue } from '../branch-linker.js';
+import { getActiveLabelScope } from '../config.js';
 
 export async function linkBranchCommand(issue: string, branch?: string): Promise<void> {
     const issueNumber = parseInt(issue, 10);
@@ -56,22 +57,27 @@ export async function linkBranchCommand(issue: string, branch?: string): Promise
     const currentBranch = await getCurrentBranch();
     if (currentBranch === branchName) {
         const activeLabel = api.getActiveLabelName();
+        const scope = getActiveLabelScope();
 
-        // Ensure the label exists
-        await api.ensureLabel(repo, activeLabel);
+        const result = await api.transferActiveLabel({
+            repo,
+            issueNumber,
+            scope,
+            projectId: item.projectId,
+            labelName: activeLabel,
+        });
 
-        // Remove label from any other issues that have it
-        const issuesWithLabel = await api.findIssuesWithLabel(repo, activeLabel);
-        for (const otherIssue of issuesWithLabel) {
-            if (otherIssue !== issueNumber) {
-                await api.removeLabelFromIssue(repo, otherIssue, activeLabel);
-                console.log(chalk.dim(`Removed ${activeLabel} from #${otherIssue}`));
+        // Log what was removed
+        for (const removed of result.removed) {
+            if (scope === 'project') {
+                console.log(chalk.dim(`Removed ${activeLabel} from ${removed.repo.fullName}#${removed.number}`));
+            } else {
+                console.log(chalk.dim(`Removed ${activeLabel} from #${removed.number}`));
             }
         }
 
-        // Add label to current issue
-        const labelAdded = await api.addLabelToIssue(repo, issueNumber, activeLabel);
-        if (labelAdded) {
+        // Log if label was added
+        if (result.added) {
             console.log(chalk.green('✓'), `Applied "${activeLabel}" label (branch is checked out)`);
         }
     }

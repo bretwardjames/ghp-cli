@@ -1,11 +1,17 @@
 import chalk from 'chalk';
 import { api } from '../github-api.js';
-import { detectRepository } from '../git-utils.js';
-import { getAddIssueDefaults } from '../config.js';
+import { getAddIssueDefaults, resolveTargetRepo } from '../config.js';
 import { spawn } from 'child_process';
 import { writeFileSync, readFileSync, unlinkSync, existsSync, readdirSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import {
+    parseIssueMetadata,
+    parseFieldsOption,
+    mergeMetadata,
+    generateMetadataTemplate,
+    type IssueMetadata,
+} from '@bretwardjames/ghp-core';
 
 interface AddIssueOptions {
     body?: string;
@@ -14,6 +20,11 @@ interface AddIssueOptions {
     edit?: boolean;
     template?: string;
     listTemplates?: boolean;
+    repo?: string;
+    labels?: string;
+    assignees?: string;
+    type?: string;
+    fields?: string;
 }
 
 async function openEditor(initialContent: string): Promise<string> {
@@ -92,9 +103,16 @@ export async function addIssueCommand(title: string, options: AddIssueOptions): 
         return;
     }
 
-    const repo = await detectRepository();
+    // Resolve target repository (--repo flag > config.defaultRepo > detect from cwd)
+    const repo = await resolveTargetRepo(options.repo);
     if (!repo) {
-        console.error(chalk.red('Error:'), 'Not in a git repository with a GitHub remote');
+        if (options.repo) {
+            console.error(chalk.red('Error:'), `Invalid repo format: ${options.repo}`);
+            console.log(chalk.dim('Expected format: owner/name (e.g., bretwardjames/ghp-core)'));
+        } else {
+            console.error(chalk.red('Error:'), 'Could not determine target repository.');
+            console.log(chalk.dim('Use --repo owner/name or set defaultRepo in config'));
+        }
         process.exit(1);
     }
 
@@ -108,7 +126,17 @@ export async function addIssueCommand(title: string, options: AddIssueOptions): 
     const defaults = getAddIssueDefaults();
 
     // Get projects
-    const projects = await api.getProjects(repo);
+    let projects;
+    try {
+        projects = await api.getProjects(repo);
+    } catch (error) {
+        if (error instanceof Error && error.message.includes('Repository not found')) {
+            console.error(chalk.red('Error:'), `Repository not found: ${repo.owner}/${repo.name}`);
+            console.log(chalk.dim('Check that the repository exists and you have access to it.'));
+            process.exit(1);
+        }
+        throw error;
+    }
     if (projects.length === 0) {
         console.error(chalk.red('Error:'), 'No GitHub Projects found for this repository');
         process.exit(1);
@@ -179,36 +207,69 @@ export async function addIssueCommand(title: string, options: AddIssueOptions): 
         }
     }
 
+    // Build initial metadata from CLI flags
+    const flagMetadata: Partial<IssueMetadata> = {
+        labels: options.labels ? options.labels.split(',').map(l => l.trim()) : [],
+        assignees: options.assignees ? options.assignees.split(',').map(a => a.trim()) : [],
+        type: options.type || null,
+        fields: options.fields ? parseFieldsOption(options.fields) : {},
+    };
+
+    // If status was provided via CLI, add it to fields
+    if (options.status) {
+        flagMetadata.fields = { ...flagMetadata.fields, status: options.status };
+    }
+
     // Open editor if: using template (always), -e flag, or no body provided
+    let contentMetadata: IssueMetadata = { labels: [], assignees: [], type: null, fields: {} };
+
     if (usingTemplate || options.edit || !options.body) {
+        // Generate metadata template with any CLI-provided values
+        const metadataBlock = generateMetadataTemplate(flagMetadata);
+
         const instructions = [
             `# ${title || '<Replace with issue title>'}`,
             '',
-            '<!-- ─────────────────────────────────────────────',
+            '<!-- ─────────────────────────────────────────────────────────',
             '     First line (after #) = Issue title',
-            '     Everything below = Issue description',
+            '     Metadata block (between ---) = labels, assignees, fields',
+            '     Everything after metadata = Issue description',
+            '     Delete any metadata lines you don\'t need',
             '     These comment lines will be removed',
-            '───────────────────────────────────────────────── -->',
+            '─────────────────────────────────────────────────────────── -->',
+            '',
+            metadataBlock,
             '',
         ].join('\n');
+
         try {
             const edited = await openEditor(instructions + body);
             // Extract title from first line if it changed
             const lines = edited.split('\n');
+            let contentAfterTitle: string;
+
             if (lines[0].startsWith('# ')) {
                 title = lines[0].slice(2).trim();
-                // Remove comment block and get body
-                body = lines.slice(1).join('\n')
-                    .replace(/<!--[\s\S]*?-->/g, '') // Remove HTML comments
-                    .trim();
+                contentAfterTitle = lines.slice(1).join('\n');
             } else {
-                body = edited.replace(/<!--[\s\S]*?-->/g, '').trim();
+                contentAfterTitle = edited;
             }
+
+            // Remove HTML comments
+            contentAfterTitle = contentAfterTitle.replace(/<!--[\s\S]*?-->/g, '').trim();
+
+            // Parse metadata from content
+            const parsed = parseIssueMetadata(contentAfterTitle);
+            contentMetadata = parsed.metadata;
+            body = parsed.body;
         } catch (err) {
             console.error(chalk.red('Error:'), 'Editor failed:', err);
             process.exit(1);
         }
     }
+
+    // Merge metadata: CLI flags override content metadata
+    const finalMetadata = mergeMetadata(contentMetadata, flagMetadata);
 
     // Validate title
     if (!title || title === 'Issue Title' || title === '<Replace with issue title>') {
@@ -216,10 +277,11 @@ export async function addIssueCommand(title: string, options: AddIssueOptions): 
         process.exit(1);
     }
 
-    // Determine status (CLI > config default > interactive picker)
-    let statusName = options.status || defaults.status;
+    // Get status from metadata fields or config default
+    let statusName = finalMetadata.fields.status || defaults.status;
     const statusField = await api.getStatusField(project.id);
 
+    // Interactive status picker if not specified
     if (!statusName && statusField && statusField.options.length > 0) {
         console.log(chalk.bold('Select initial status:'));
         statusField.options.forEach((opt, i) => console.log(`  ${i + 1}. ${opt.name}`));
@@ -252,6 +314,47 @@ export async function addIssueCommand(title: string, options: AddIssueOptions): 
 
     console.log(chalk.green('Created:'), `#${issue.number} ${title}`);
 
+    // Apply labels
+    if (finalMetadata.labels.length > 0) {
+        for (const label of finalMetadata.labels) {
+            await api.ensureLabel(repo, label);
+            const added = await api.addLabelToIssue(repo, issue.number, label);
+            if (added) {
+                console.log(chalk.green('Label:'), label);
+            } else {
+                console.log(chalk.yellow('Warning:'), `Failed to add label "${label}"`);
+            }
+        }
+    }
+
+    // Apply assignees
+    if (finalMetadata.assignees.length > 0) {
+        const success = await api.updateAssignees(repo, issue.number, finalMetadata.assignees);
+        if (success) {
+            console.log(chalk.green('Assignees:'), finalMetadata.assignees.join(', '));
+        } else {
+            console.log(chalk.yellow('Warning:'), 'Failed to set assignees');
+        }
+    }
+
+    // Apply issue type
+    if (finalMetadata.type) {
+        const issueTypes = await api.getIssueTypes(repo);
+        const issueType = issueTypes.find(t =>
+            t.name.toLowerCase() === finalMetadata.type!.toLowerCase()
+        );
+        if (issueType) {
+            const success = await api.setIssueType(repo, issue.number, issueType.id);
+            if (success) {
+                console.log(chalk.green('Type:'), finalMetadata.type);
+            } else {
+                console.log(chalk.yellow('Warning:'), `Failed to set type "${finalMetadata.type}"`);
+            }
+        } else {
+            console.log(chalk.yellow('Warning:'), `Issue type "${finalMetadata.type}" not found`);
+        }
+    }
+
     // Add to project
     const itemId = await api.addToProject(project.id, issue.id);
     if (!itemId) {
@@ -261,16 +364,48 @@ export async function addIssueCommand(title: string, options: AddIssueOptions): 
 
     console.log(chalk.green('Added to:'), project.title);
 
-    // Set initial status
-    if (statusName && statusField) {
-        const option = statusField.options.find(o =>
-            o.name.toLowerCase() === statusName!.toLowerCase()
+    // Set project fields (including status)
+    const projectFields = await api.getProjectFields(project.id);
+
+    for (const [fieldName, fieldValue] of Object.entries(finalMetadata.fields)) {
+        // Find matching field (case-insensitive)
+        const field = projectFields.find(f =>
+            f.name.toLowerCase() === fieldName.toLowerCase()
         );
-        if (option) {
-            await api.updateItemStatus(project.id, itemId, statusField.fieldId, option.id);
-            console.log(chalk.green('Status:'), statusName);
+
+        if (!field) {
+            if (fieldName.toLowerCase() !== 'status') {
+                console.log(chalk.yellow('Warning:'), `Field "${fieldName}" not found in project`);
+            }
+            continue;
+        }
+
+        // Handle different field types
+        if (field.type === 'SingleSelect' && field.options) {
+            const option = field.options.find(o =>
+                o.name.toLowerCase() === fieldValue.toLowerCase()
+            );
+            if (option) {
+                await api.setFieldValue(project.id, itemId, field.id, { singleSelectOptionId: option.id });
+                console.log(chalk.green(`${field.name}:`), fieldValue);
+            } else {
+                console.log(chalk.yellow('Warning:'), `Option "${fieldValue}" not found for field "${fieldName}"`);
+            }
+        } else if (field.type === '' || field.type === 'Text') {
+            // Text field
+            await api.setFieldValue(project.id, itemId, field.id, { text: fieldValue });
+            console.log(chalk.green(`${field.name}:`), fieldValue);
+        } else if (field.type === 'Number') {
+            // Number field
+            const numValue = parseFloat(fieldValue);
+            if (!isNaN(numValue)) {
+                await api.setFieldValue(project.id, itemId, field.id, { number: numValue });
+                console.log(chalk.green(`${field.name}:`), fieldValue);
+            } else {
+                console.log(chalk.yellow('Warning:'), `Invalid number value "${fieldValue}" for field "${fieldName}"`);
+            }
         } else {
-            console.log(chalk.yellow('Warning:'), `Status "${statusName}" not found`);
+            console.log(chalk.yellow('Warning:'), `Unsupported field type "${field.type}" for field "${fieldName}"`);
         }
     }
 

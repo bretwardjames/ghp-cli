@@ -2,8 +2,8 @@ import chalk from 'chalk';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { api } from '../github-api.js';
-import { detectRepository, getCurrentBranch, hasUncommittedChanges, branchExists, createBranch, checkoutBranch, getCommitsBehind, pullLatest, generateBranchName, getAllBranches, type RepoInfo } from '../git-utils.js';
-import { getConfig } from '../config.js';
+import { getCurrentBranch, hasUncommittedChanges, branchExists, createBranch, checkoutBranch, getCommitsBehind, pullLatest, generateBranchName, getAllBranches, type RepoInfo } from '../git-utils.js';
+import { getConfig, resolveTargetRepo } from '../config.js';
 import { linkBranch, getBranchForIssue } from '../branch-linker.js';
 import * as readline from 'readline';
 
@@ -12,6 +12,7 @@ const execAsync = promisify(exec);
 interface StartOptions {
     branch?: boolean;
     status?: boolean;
+    repo?: string;
 }
 
 function prompt(question: string): Promise<string> {
@@ -170,10 +171,16 @@ export async function startCommand(issue: string, options: StartOptions): Promis
         process.exit(1);
     }
 
-    // Detect repository
-    const repo = await detectRepository();
+    // Resolve target repository (--repo flag > config.defaultRepo > detect from cwd)
+    const repo = await resolveTargetRepo(options.repo);
     if (!repo) {
-        console.error(chalk.red('Error:'), 'Not in a git repository with a GitHub remote');
+        if (options.repo) {
+            console.error(chalk.red('Error:'), `Invalid repo format: ${options.repo}`);
+            console.log(chalk.dim('Expected format: owner/name (e.g., bretwardjames/ghp-core)'));
+        } else {
+            console.error(chalk.red('Error:'), 'Could not determine target repository.');
+            console.log(chalk.dim('Use --repo owner/name or set defaultRepo in config'));
+        }
         process.exit(1);
     }
 

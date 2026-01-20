@@ -1,17 +1,25 @@
 import chalk from 'chalk';
 import { api, type IssueDetails } from '../github-api.js';
-import { detectRepository } from '../git-utils.js';
+import { resolveTargetRepo } from '../config.js';
 import { parseBranchLink } from '@bretwardjames/ghp-core';
 import type { ProjectItem } from '../types.js';
 
 interface OpenOptions {
     browser?: boolean;
+    repo?: string;
 }
 
 export async function openCommand(issue: string, options: OpenOptions): Promise<void> {
-    const repo = await detectRepository();
+    // Resolve target repository (--repo flag > config.defaultRepo > detect from cwd)
+    const repo = await resolveTargetRepo(options.repo);
     if (!repo) {
-        console.error(chalk.red('Error:'), 'Not in a git repository with a GitHub remote');
+        if (options.repo) {
+            console.error(chalk.red('Error:'), `Invalid repo format: ${options.repo}`);
+            console.log(chalk.dim('Expected format: owner/name (e.g., bretwardjames/ghp-core)'));
+        } else {
+            console.error(chalk.red('Error:'), 'Could not determine target repository.');
+            console.log(chalk.dim('Use --repo owner/name or set defaultRepo in config'));
+        }
         process.exit(1);
     }
 

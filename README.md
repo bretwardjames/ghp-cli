@@ -1,3 +1,6 @@
+> **Note**: This repository has moved to [github.com/bretwardjames/ghp](https://github.com/bretwardjames/ghp).
+> This repo is archived and no longer maintained.
+
 # ghp-cli
 
 GitHub Projects CLI - manage project boards from your terminal.

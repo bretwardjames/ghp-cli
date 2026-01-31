@@ -1,15 +1,26 @@
 import chalk from 'chalk';
 import { api } from '../github-api.js';
-import { detectRepository } from '../git-utils.js';
+import { resolveTargetRepo } from '../config.js';
 import { spawn } from 'child_process';
 import { writeFileSync, readFileSync, unlinkSync, existsSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 
-export async function editCommand(issue: string): Promise<void> {
-    const repo = await detectRepository();
+interface EditOptions {
+    repo?: string;
+}
+
+export async function editCommand(issue: string, options: EditOptions): Promise<void> {
+    // Resolve target repository (--repo flag > config.defaultRepo > detect from cwd)
+    const repo = await resolveTargetRepo(options.repo);
     if (!repo) {
-        console.error(chalk.red('Error:'), 'Not in a git repository with a GitHub remote');
+        if (options.repo) {
+            console.error(chalk.red('Error:'), `Invalid repo format: ${options.repo}`);
+            console.log(chalk.dim('Expected format: owner/name (e.g., bretwardjames/ghp-core)'));
+        } else {
+            console.error(chalk.red('Error:'), 'Could not determine target repository.');
+            console.log(chalk.dim('Use --repo owner/name or set defaultRepo in config'));
+        }
         process.exit(1);
     }
 
@@ -26,7 +37,17 @@ export async function editCommand(issue: string): Promise<void> {
     }
 
     // Fetch current issue details
-    const details = await api.getIssueDetails(repo, issueNumber);
+    let details;
+    try {
+        details = await api.getIssueDetails(repo, issueNumber);
+    } catch (error) {
+        if (error instanceof Error && error.message.includes('Repository not found')) {
+            console.error(chalk.red('Error:'), `Repository not found: ${repo.owner}/${repo.name}`);
+            console.log(chalk.dim('Check that the repository exists and you have access to it.'));
+            process.exit(1);
+        }
+        throw error;
+    }
     if (!details) {
         console.error(chalk.red('Issue not found:'), `#${issueNumber}`);
         process.exit(1);

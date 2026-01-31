@@ -89,18 +89,21 @@ program
     .description('Start working on an issue - creates branch and updates status')
     .option('--no-branch', 'Skip branch creation')
     .option('--no-status', 'Skip status update')
+    .option('-r, --repo <owner/name>', 'Target repository (overrides config and auto-detect)')
     .action(startCommand);
 
 program
     .command('done <issue>')
     .alias('d')
     .description('Mark an issue as done')
+    .option('-r, --repo <owner/name>', 'Target repository (overrides config and auto-detect)')
     .action(doneCommand);
 
 program
     .command('move <issue> <status>')
     .alias('m')
     .description('Move an issue to a different status')
+    .option('-r, --repo <owner/name>', 'Target repository (overrides config and auto-detect)')
     .action(moveCommand);
 
 // Branch commands
@@ -108,12 +111,14 @@ program
     .command('switch <issue>')
     .alias('sw')
     .description('Switch to the branch linked to an issue')
+    .option('-r, --repo <owner/name>', 'Target repository (overrides config and auto-detect)')
     .action(switchCommand);
 
 program
     .command('link-branch <issue> [branch]')
     .alias('lb')
     .description('Link a branch to an issue (defaults to current branch)')
+    .option('-r, --repo <owner/name>', 'Target repository (overrides config and auto-detect)')
     .action(linkBranchCommand);
 
 program
@@ -135,6 +140,7 @@ program
     .command('assign <issue> [users...]')
     .description('Assign users to an issue (empty to assign self)')
     .option('--remove', 'Remove assignment instead of adding')
+    .option('-r, --repo <owner/name>', 'Target repository (overrides config and auto-detect)')
     .action(assignCommand);
 
 // Issue creation
@@ -148,6 +154,7 @@ program
     .option('-e, --edit', 'Open $EDITOR to write issue body')
     .option('-t, --template <name>', 'Use an issue template from .github/ISSUE_TEMPLATE/')
     .option('--list-templates', 'List available issue templates')
+    .option('-r, --repo <owner/name>', 'Target repository (overrides config and auto-detect)')
     .action(addIssueCommand);
 
 // Field management
@@ -155,6 +162,7 @@ program
     .command('set-field <issue> <field> <value>')
     .alias('sf')
     .description('Set a field value on an issue')
+    .option('-r, --repo <owner/name>', 'Target repository (overrides config and auto-detect)')
     .action(setFieldCommand);
 
 // Filtering/slicing
@@ -172,6 +180,7 @@ program
     .alias('o')
     .description('View issue details')
     .option('-b, --browser', 'Open in browser instead of terminal')
+    .option('-r, --repo <owner/name>', 'Target repository (overrides config and auto-detect)')
     .action(openCommand);
 
 program
@@ -179,12 +188,14 @@ program
     .alias('c')
     .description('Add a comment to an issue')
     .option('-m, --message <text>', 'Comment text (opens editor if not provided)')
+    .option('-r, --repo <owner/name>', 'Target repository (overrides config and auto-detect)')
     .action(commentCommand);
 
 program
     .command('edit <issue>')
     .alias('e')
     .description('Edit an issue description in $EDITOR')
+    .option('-r, --repo <owner/name>', 'Target repository (overrides config and auto-detect)')
     .action(editCommand);
 
 // Active label sync
